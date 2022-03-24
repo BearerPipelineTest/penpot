@@ -316,29 +316,6 @@
      [:> shape-container {:shape group}
       [:& group-wrapper {:shape group :view-box vbox}]]]))
 
-(defn- calc-bounds
-  [object objects]
-  (let [xf-get-bounds (comp (map (d/getf objects)) (map #(calc-bounds % objects)))
-        padding       (filters/calculate-padding object)
-        obj-bounds    (-> (filters/get-filters-bounds object)
-                          (update :x - padding)
-                          (update :y - padding)
-                          (update :width + (* 2 padding))
-                          (update :height + (* 2 padding)))]
-
-    (cond
-      (and (= :group (:type object))
-           (:masked-group? object))
-      (calc-bounds (get objects (first (:shapes object))) objects)
-
-      (= :group (:type object))
-      (->> (:shapes object)
-           (into [obj-bounds] xf-get-bounds)
-           (gsh/join-rects))
-
-      :else
-      obj-bounds)))
-
 (mf/defc object-svg
   {::mf/wrap [mf/memo]}
   [{:keys [objects object bounds zoom render-texts? embed?]
@@ -370,11 +347,6 @@
 
         text-shapes   (sequence (filter cph/text-shape?) (vals objects))
         render-texts? (and render-texts? (d/seek (comp nil? :position-data) text-shapes))]
-
-    ;; (mf/with-effect [width height]
-    ;;   (dom/set-page-style!
-    ;;    {:size (dm/str (mth/ceil width) "px "
-    ;;                   (mth/ceil height) "px")}))
 
     [:& (mf/provider embed/context) {:value embed?}
      [:svg {:id (dm/str "screenshot-" obj-id)
