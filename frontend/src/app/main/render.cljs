@@ -14,6 +14,8 @@
   (:require
    ["react-dom/server" :as rds]
    [app.common.colors :as clr]
+   [app.common.data :as d]
+   [app.common.data.macros :as dm]
    [app.common.geom.align :as gal]
    [app.common.geom.matrix :as gmt]
    [app.common.geom.point :as gpt]
@@ -22,10 +24,12 @@
    [app.common.pages.helpers :as cph]
    [app.config :as cfg]
    [app.main.fonts :as fonts]
+   [app.main.ui.context :as muc]
    [app.main.ui.shapes.bool :as bool]
    [app.main.ui.shapes.circle :as circle]
    [app.main.ui.shapes.embed :as embed]
    [app.main.ui.shapes.export :as export]
+   [app.main.ui.shapes.filters :as filters]
    [app.main.ui.shapes.frame :as frame]
    [app.main.ui.shapes.group :as group]
    [app.main.ui.shapes.image :as image]
@@ -214,6 +218,10 @@
              [:& shape-wrapper {:shape item
                                 :key (:id item)}])))]]]))
 
+
+;; Component that serves for render frame thumbnails, mainly used in
+;; the viewer and handoff
+
 (mf/defc frame-svg
   {::mf/wrap [mf/memo]}
   [{:keys [objects frame zoom show-thumbnails?] :or {zoom 1} :as props}]
@@ -260,6 +268,10 @@
          [:> shape-container {:shape frame}
           [:& frame/frame-thumbnail {:shape frame}]]))]))
 
+
+;; Component for rendering a thumbnail of a single componenent. Mainly
+;; used to render thumbnails on assets panel.
+
 (mf/defc component-svg
   {::mf/wrap [mf/memo #(mf/deferred % ts/idle-then-raf)]}
   [{:keys [objects group zoom] :or {zoom 1} :as props}]
@@ -303,6 +315,104 @@
 
      [:> shape-container {:shape group}
       [:& group-wrapper {:shape group :view-box vbox}]]]))
+
+(defn- calc-bounds
+  [object objects]
+  (let [xf-get-bounds (comp (map (d/getf objects)) (map #(calc-bounds % objects)))
+        padding       (filters/calculate-padding object)
+        obj-bounds    (-> (filters/get-filters-bounds object)
+                          (update :x - padding)
+                          (update :y - padding)
+                          (update :width + (* 2 padding))
+                          (update :height + (* 2 padding)))]
+
+    (cond
+      (and (= :group (:type object))
+           (:masked-group? object))
+      (calc-bounds (get objects (first (:shapes object))) objects)
+
+      (= :group (:type object))
+      (->> (:shapes object)
+           (into [obj-bounds] xf-get-bounds)
+           (gsh/join-rects))
+
+      :else
+      obj-bounds)))
+
+(mf/defc object-svg
+  {::mf/wrap [mf/memo]}
+  [{:keys [objects object bounds zoom render-texts? embed?]
+    :or {zoom 1 embed? false}
+    :as props}]
+  (let [object (cond-> object
+                   (:hide-fill-on-export object)
+                   (assoc :fills []))
+
+        obj-id (:id object)
+        x      (* (:x bounds) zoom)
+        y      (* (:y bounds) zoom)
+        width  (* (:width bounds) zoom)
+        height (* (:height bounds) zoom)
+
+        vbox   (dm/str x " " y " " width " " height)
+
+        frame-wrapper
+        (mf/with-memo [objects]
+          (frame-wrapper-factory objects))
+
+        group-wrapper
+        (mf/with-memo [objects]
+          (group-wrapper-factory objects))
+
+        shape-wrapper
+        (mf/with-memo [objects]
+          (shape-wrapper-factory objects))
+
+        text-shapes   (sequence (filter cph/text-shape?) (vals objects))
+        render-texts? (and render-texts? (d/seek (comp nil? :position-data) text-shapes))]
+
+    ;; (mf/with-effect [width height]
+    ;;   (dom/set-page-style!
+    ;;    {:size (dm/str (mth/ceil width) "px "
+    ;;                   (mth/ceil height) "px")}))
+
+    [:& (mf/provider embed/context) {:value embed?}
+     [:svg {:id (dm/str "screenshot-" obj-id)
+            :view-box vbox
+            :width width
+            :height height
+            :version "1.1"
+            :xmlns "http://www.w3.org/2000/svg"
+            :xmlnsXlink "http://www.w3.org/1999/xlink"
+            ;; Fix Chromium bug about color of html texts
+            ;; https://bugs.chromium.org/p/chromium/issues/detail?id=1244560#c5
+            :style {:-webkit-print-color-adjust :exact}}
+
+      (let [shapes (cph/get-children objects obj-id)]
+        [:& ff/fontfaces-style {:shapes shapes}])
+
+      (case (:type object)
+        :frame [:& frame-wrapper {:shape object :view-box vbox}]
+        :group [:> shape-container {:shape object}
+                [:& group-wrapper {:shape object}]]
+        [:& shape-wrapper {:shape object}])]
+
+     ;; Auxiliary SVG for rendering text-shapes
+     (when render-texts?
+       (for [object text-shapes]
+         [:& (mf/provider muc/text-plain-colors-ctx) {:value true}
+          [:svg {:id (str "screenshot-text-" (:id object))
+                 :view-box (str "0 0 " (:width object) " " (:height object))
+                 :width (:width object)
+                 :height (:height object)
+                 :version "1.1"
+                 :xmlns "http://www.w3.org/2000/svg"
+                 :xmlnsXlink "http://www.w3.org/1999/xlink"}
+           [:& shape-wrapper {:shape (assoc object :x 0 :y 0)}]]]))]))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; SPRITES (DEBUG)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (mf/defc component-symbol
   {::mf/wrap-props false}
@@ -376,6 +486,32 @@
                                 :data component-data}])]
 
        children]]]))
+
+;; ;; TODO: move outside
+;; (mf/defc render-sprite
+;;   [{:keys [file-id component-id] :as props}]
+;;   (let [file (mf/use-state nil)]
+
+;;     (mf/with-effect [file-id]
+;;       (->> (repo/query! :file {:id file-id})
+;;            (rx/subs
+;;             (fn [result]
+;;               (reset! file result))))
+;;       (constantly nil))
+
+;;     (when @file
+;;       [:*
+;;        [:& components-sprite-svg {:data (:data @file) :embed true}
+
+;;         (when (some? component-id)
+;;           [:use {:x 0 :y 0
+;;                  :xlinkHref (str "#" component-id)}])]
+
+;;        (when-not (some? component-id)
+;;          [:ul
+;;           (for [[id data] (get-in @file [:data :components])]
+;;             (let [url (str "#/render-sprite/" (:id @file) "?component-id=" id)]
+;;               [:li [:a {:href url} (:name data)]]))])])))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; RENDERING
